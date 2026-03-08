@@ -26,6 +26,32 @@ const COMBO_WINDOW = 0.5; // seconds to chain next attack
 const HITSTOP_DURATION = 0.06;
 const PARRY_WINDOW = 0.15;
 
+// --- Dash Attack ---
+const DASH_SPEED = 600;
+const DASH_DURATION = 0.22;
+const DASH_DAMAGE = 25;
+const DASH_KNOCKBACK = 300;
+const DASH_COST = 15;
+
+// --- Air Attack ---
+const AIR_ATTACK_DAMAGE = 18;
+const AIR_ATTACK_KNOCKBACK = 200;
+const AIR_JUGGLE_VY = -350;
+
+// --- Fury System ---
+const FURY_MAX = 100;
+const FURY_PER_HIT = 8;
+const FURY_PER_KILL = 15;
+const FURY_PER_PARRY = 25;
+const FURY_ULTIMATE_DAMAGE = 50;
+const FURY_ULTIMATE_RANGE = 200;
+
+// --- Power-ups ---
+const POWERUP_DROP_CHANCE = 0.3;
+const POWERUP_LIFETIME = 8;
+const POWERUP_EFFECT_DURATION = 5;
+const DOUBLE_TAP_WINDOW = 0.25;
+
 // Attack data: each attack has distinct saber arc for visual variety
 const ATTACKS = [
     { name: 'light',  damage: 12, knockback: 180, duration: 0.28, hitStart: 0.06, hitEnd: 0.16,
@@ -71,6 +97,9 @@ const ANIM_DEFS = {
     dead:             { folder: 'falling-back-death',          frames: 7,  fps: 8,  loop: false },
     hurt:             { folder: 'taking-punch',                frames: 6,  fps: 15, loop: false },
     combat_idle:      { folder: 'fight-stance-idle-8-frames',  frames: 8,  fps: 8,  loop: true },
+    dash_attack:      { folder: 'lead-jab',                    frames: 3,  fps: 15, loop: false },
+    air_attack:       { folder: 'high-kick',                   frames: 7,  fps: 18, loop: false },
+    fury_ultimate:    { folder: 'cross-punch',                 frames: 6,  fps: 10, loop: true },
 };
 
 // Sprite storage: sprites.jedi.idle.east[0..3], sprites.jedi.attack1.east[0..2], etc.
@@ -275,6 +304,72 @@ function playSound(type) {
             gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
             break;
         }
+        case 'dash_attack': {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(400, now);
+            osc.frequency.exponentialRampToValueAtTime(100, now + 0.15);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+            osc.connect(gain).connect(audioCtx.destination);
+            osc.start(now); osc.stop(now + 0.15);
+            const nbuf2 = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+            const nd2 = nbuf2.getChannelData(0);
+            for (let i = 0; i < nd2.length; i++) nd2[i] = (Math.random() * 2 - 1) * (1 - i / nd2.length);
+            const ns2 = audioCtx.createBufferSource();
+            const ng2 = audioCtx.createGain();
+            ns2.buffer = nbuf2;
+            ng2.gain.setValueAtTime(0.2, now);
+            ng2.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+            ns2.connect(ng2).connect(audioCtx.destination);
+            ns2.start(now);
+            break;
+        }
+        case 'fury_activate': {
+            [0, 0.08, 0.16].forEach((delay, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'square';
+                osc.frequency.value = [330, 440, 660][i];
+                gain.gain.setValueAtTime(0.15, now + delay);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.5);
+                osc.connect(gain).connect(audioCtx.destination);
+                osc.start(now + delay); osc.stop(now + delay + 0.5);
+            });
+            const sub = audioCtx.createOscillator();
+            const sg = audioCtx.createGain();
+            sub.type = 'sine'; sub.frequency.value = 55;
+            sg.gain.setValueAtTime(0.3, now);
+            sg.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+            sub.connect(sg).connect(audioCtx.destination);
+            sub.start(now); sub.stop(now + 0.8);
+            break;
+        }
+        case 'powerup_collect': {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(600, now);
+            osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+            osc.connect(gain).connect(audioCtx.destination);
+            osc.start(now); osc.stop(now + 0.15);
+            break;
+        }
+        case 'air_hit': {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(500, now);
+            osc.frequency.exponentialRampToValueAtTime(200, now + 0.15);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+            osc.connect(gain).connect(audioCtx.destination);
+            osc.start(now); osc.stop(now + 0.15);
+            break;
+        }
         case 'death': {
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
@@ -316,6 +411,186 @@ function startSaberHum() {
     humOsc.connect(humGain).connect(audioCtx.destination);
     humOsc.start();
 }
+
+// --- TIME SCALE (slow-motion) ---
+let timeScale = 1;
+let timeScaleTarget = 1;
+let timeScaleTimer = 0;
+let timeScaleDuration = 0;
+let rawDt = 0;
+
+function triggerSlowMo(scale, duration) {
+    timeScaleTarget = scale;
+    timeScaleDuration = duration;
+    timeScaleTimer = 0;
+}
+
+function updateTimeScale(rdt) {
+    if (timeScaleDuration > 0) {
+        timeScaleTimer += rdt;
+        const t = timeScaleTimer / timeScaleDuration;
+        if (t < 0.3) {
+            timeScale += (timeScaleTarget - timeScale) * 10 * rdt;
+        } else {
+            timeScale += (1 - timeScale) * 3 * rdt;
+        }
+        if (t >= 1) { timeScaleDuration = 0; timeScale = 1; }
+    } else {
+        timeScale += (1 - timeScale) * 8 * rdt;
+    }
+}
+
+// --- CAMERA ZOOM ---
+let cameraZoom = 1;
+let cameraZoomTarget = 1;
+let cameraZoomTimer = 0;
+let cameraZoomDuration = 0;
+let cameraFocusX = GAME_W / 2;
+let cameraFocusY = GAME_H / 2;
+
+function triggerZoom(zoom, focusX, focusY, duration) {
+    cameraZoomTarget = zoom;
+    cameraFocusX = focusX;
+    cameraFocusY = focusY;
+    cameraZoomDuration = duration;
+    cameraZoomTimer = 0;
+}
+
+function updateZoom(rdt) {
+    if (cameraZoomDuration <= 0) {
+        cameraZoom += (1 - cameraZoom) * 5 * rdt;
+        return;
+    }
+    cameraZoomTimer += rdt;
+    const t = cameraZoomTimer / cameraZoomDuration;
+    if (t < 0.2) {
+        cameraZoom += (cameraZoomTarget - cameraZoom) * 10 * rdt;
+    } else {
+        cameraZoom += (1 - cameraZoom) * 3 * rdt;
+    }
+    if (t >= 1) { cameraZoomDuration = 0; cameraZoom = 1; }
+}
+
+// --- CHROMATIC ABERRATION ---
+let chromaIntensity = 0;
+
+function triggerChroma(intensity) {
+    chromaIntensity = Math.min(1, chromaIntensity + intensity);
+}
+
+// --- SPEED LINES ---
+const speedLines = [];
+
+function spawnSpeedLines(x, y, dirX, count) {
+    for (let i = 0; i < count; i++) {
+        speedLines.push({
+            x: x + (Math.random() - 0.5) * 100,
+            y: y + (Math.random() - 0.5) * 80,
+            len: 20 + Math.random() * 40,
+            vx: dirX * (300 + Math.random() * 400),
+            life: 0.15 + Math.random() * 0.15,
+            maxLife: 0.3,
+            width: 1 + Math.random() * 2,
+        });
+    }
+}
+
+function updateSpeedLines(dt) {
+    for (let i = speedLines.length - 1; i >= 0; i--) {
+        const l = speedLines[i];
+        l.x += l.vx * dt;
+        l.life -= dt;
+        if (l.life <= 0) speedLines.splice(i, 1);
+    }
+}
+
+function drawSpeedLines() {
+    for (const l of speedLines) {
+        const alpha = l.life / l.maxLife;
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.6;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = l.width;
+        ctx.beginPath();
+        ctx.moveTo(l.x, l.y);
+        ctx.lineTo(l.x - l.vx * 0.03, l.y);
+        ctx.stroke();
+        ctx.restore();
+    }
+}
+
+// --- POWER-UP SYSTEM ---
+const POWERUP_TYPES = [
+    { type: 'heal',  color: '#44ff44', glowColor: '#00ff00', label: '+HP' },
+    { type: 'speed', color: '#ffff44', glowColor: '#ffff00', label: 'SPD' },
+    { type: 'power', color: '#ff4444', glowColor: '#ff0000', label: 'PWR' },
+    { type: 'force', color: '#4488ff', glowColor: '#0044ff', label: 'FRC' },
+];
+
+const powerups = [];
+
+function applyPowerup(player, type) {
+    switch (type.type) {
+        case 'heal':  player.hp = Math.min(player.maxHp, player.hp + 30); break;
+        case 'speed': player.speedBoost = POWERUP_EFFECT_DURATION; break;
+        case 'power': player.powerBoost = POWERUP_EFFECT_DURATION; break;
+        case 'force': player.force = player.maxForce; break;
+    }
+}
+
+function spawnPowerup(x) {
+    if (Math.random() >= POWERUP_DROP_CHANCE) return;
+    const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+    powerups.push({ x, y: GROUND_Y, type, lifetime: POWERUP_LIFETIME, time: 0 });
+}
+
+function updatePowerups(dt, player) {
+    for (let i = powerups.length - 1; i >= 0; i--) {
+        const p = powerups[i];
+        p.time += dt;
+        p.lifetime -= dt;
+        if (p.lifetime <= 0) { powerups.splice(i, 1); continue; }
+        if (Math.abs(player.x - p.x) < 30 && player.state !== 'dead') {
+            applyPowerup(player, p.type);
+            playSound('powerup_collect');
+            spawnParticles(p.x, p.y - 15, p.type.color, 10, 150, 0.4);
+            powerups.splice(i, 1);
+        }
+    }
+}
+
+function drawPowerups() {
+    for (const p of powerups) {
+        const bob = Math.sin(p.time * 4) * 6;
+        const pulse = 0.7 + 0.3 * Math.sin(p.time * 6);
+        const fadeOut = p.lifetime < 2 ? p.lifetime / 2 : 1;
+        ctx.save();
+        ctx.globalAlpha = fadeOut;
+        ctx.shadowColor = p.type.glowColor;
+        ctx.shadowBlur = 15 * pulse;
+        ctx.fillStyle = p.type.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y - 15 + bob, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = fadeOut * 0.7;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y - 15 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = fadeOut;
+        ctx.fillStyle = p.type.color;
+        ctx.font = '7px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.type.label, p.x, p.y - 30 + bob);
+        ctx.textAlign = 'left';
+        ctx.restore();
+    }
+}
+
+// --- DOUBLE TAP ---
+let lastTapDir = 0;
+let doubleTapTimer = 0;
 
 // --- PARTICLE SYSTEM ---
 const particles = [];
@@ -561,6 +836,33 @@ function drawCorridorBackground(time) {
     ctx.fillRect(0, GROUND_Y, GAME_W, 2);
 }
 
+// --- DYNAMIC SABER LIGHTING ---
+function drawDynamicLighting(playerFighter, enemies) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const fighters = [playerFighter, ...enemies];
+    for (const f of fighters) {
+        if (!f || f.state === 'dead') continue;
+        const isAtk = f.state.startsWith('attack') || f.state === 'dash_attack' || f.state === 'air_attack' || f.state === 'fury_ultimate';
+        const intensity = isAtk ? 0.15 : 0.06;
+        const color = f.isPlayer ? '#44aaff' : '#ff4444';
+        const radius = isAtk ? 150 : 80;
+        const grad = ctx.createRadialGradient(f.x, f.y - 30, 0, f.x, f.y - 30, radius);
+        grad.addColorStop(0, color);
+        grad.addColorStop(1, 'transparent');
+        ctx.globalAlpha = intensity;
+        ctx.fillStyle = grad;
+        ctx.fillRect(f.x - radius, f.y - 30 - radius, radius * 2, radius * 2);
+        const floorGrad = ctx.createRadialGradient(f.x, GROUND_Y, 0, f.x, GROUND_Y, radius * 0.7);
+        floorGrad.addColorStop(0, color);
+        floorGrad.addColorStop(1, 'transparent');
+        ctx.globalAlpha = intensity * 0.5;
+        ctx.fillStyle = floorGrad;
+        ctx.fillRect(f.x - radius, GROUND_Y, radius * 2, 50);
+    }
+    ctx.restore();
+}
+
 // --- SABER ARC TRAIL SYSTEM ---
 // Stores recent saber tip positions to draw filled arc trails
 const ARC_TRAIL_MAX = 12;
@@ -676,6 +978,22 @@ function getSaberParams(state, stateTime) {
         angle = 2.4;
         pivotX = -8;
         len = 30;
+    } else if (state === 'dash_attack') {
+        angle = -1.5;
+        len = 48;
+        swinging = stateTime > 0.05 && stateTime < 0.18;
+        phase = stateTime < 0.05 ? 'windup' : (stateTime < 0.15 ? 'strike' : 'followthrough');
+    } else if (state === 'air_attack') {
+        const t = Math.min(1, stateTime / 0.35);
+        angle = -2.0 + t * 3.5;
+        len = 46;
+        swinging = t > 0.1 && t < 0.8;
+        phase = t < 0.15 ? 'windup' : (t < 0.6 ? 'strike' : 'followthrough');
+    } else if (state === 'fury_ultimate') {
+        angle = stateTime * 8;
+        len = 50;
+        swinging = true;
+        phase = 'strike';
     } else if (state === 'hurt') {
         angle = 1.8 + stateTime * 3;
         len = 34;
@@ -952,6 +1270,12 @@ class Fighter {
         this.hitApplied = false;
         this.grounded = true;
 
+        this.fury = 0;
+        this.speedBoost = 0;
+        this.powerBoost = 0;
+        this.dashCooldown = 0;
+        this.furySlashCount = 0;
+
         this.width = 24;
         this.height = 50;
     }
@@ -993,6 +1317,7 @@ class Fighter {
             spawnParticles(clashX, clashY, '#ffffff', 10, 300, 0.4);
             // Saber clash ring effect
             saberClashes.push({ x: clashX, y: clashY, time: 0, maxTime: 0.35 });
+            this.fury = Math.min(FURY_MAX, this.fury + FURY_PER_PARRY);
             return 'parried';
         }
 
@@ -1019,6 +1344,7 @@ class Fighter {
         spawnParticles(this.x, this.y - 25, '#ff8844', 6, 150, 0.3);
         triggerShake(damage > 20 ? 10 : 5, damage > 20 ? 0.2 : 0.12);
         triggerHitstop(damage > 20 ? 0.1 : HITSTOP_DURATION);
+        if (damage > 20) triggerChroma(0.3);
 
         if (this.hp <= 0) {
             this.hp = 0;
@@ -1038,6 +1364,9 @@ class Fighter {
         this.stateTime += dt;
         this.comboTimer -= dt;
         this.forcePushCooldown -= dt;
+        this.dashCooldown -= dt;
+        if (this.speedBoost > 0) this.speedBoost -= dt;
+        if (this.powerBoost > 0) this.powerBoost -= dt;
 
         // Regen
         if (this.state !== 'block') {
@@ -1064,13 +1393,21 @@ class Fighter {
                 // Hit window
                 if (!this.hitApplied && this.stateTime >= atk.hitStart && this.stateTime <= atk.hitEnd) {
                     if (target && aabbOverlap(this.attackHitbox, target.hitbox)) {
-                        const result = target.takeDamage(atk.damage, this.facing, atk.knockback);
+                        const dmg = this.powerBoost > 0 ? atk.damage * 2 : atk.damage;
+                        const result = target.takeDamage(dmg, this.facing, atk.knockback);
                         this.hitApplied = true;
                         if (result === 'parried') {
                             this.state = 'hurt';
                             this.stateTime = 0;
                             this.vx = -this.facing * 350;
                             this.vy = -80;
+                        } else if (result === 'hit' || result === 'killed') {
+                            this.fury = Math.min(FURY_MAX, this.fury + FURY_PER_HIT);
+                            if (result === 'killed') this.fury = Math.min(FURY_MAX, this.fury + FURY_PER_KILL);
+                            if (idx === 2) {
+                                triggerZoom(1.05, (this.x + target.x) / 2, (this.y + target.y) / 2 - 20, 0.3);
+                                triggerChroma(0.4);
+                            }
                         }
                     }
                 }
@@ -1125,7 +1462,7 @@ class Fighter {
                     this.lightningActive = true;
                     if (target && Math.abs(target.x - this.x) < 300) {
                         target.takeDamage(FORCE_LIGHTNING_DPS * dt, this.facing, 20);
-                        this.lightningTarget = { x: target.x, y: target.y - 25 };
+                        this.lightningTarget = { x: target.x, y: target.y - 60 };
                     }
                 }
                 break;
@@ -1138,6 +1475,54 @@ class Fighter {
                     this.stateTime = 0;
                 }
                 break;
+            case 'dash_attack': {
+                const dashT = this.stateTime / DASH_DURATION;
+                if (dashT < 0.7) {
+                    this.vx = this.facing * DASH_SPEED;
+                    if (Math.random() < 0.4) spawnSpeedLines(this.x - this.facing * 30, this.y - 25, -this.facing, 2);
+                }
+                if (!this.hitApplied && this.stateTime >= 0.05 && this.stateTime <= 0.18) {
+                    if (target && aabbOverlap(this.attackHitbox, target.hitbox)) {
+                        const dmg = this.powerBoost > 0 ? DASH_DAMAGE * 2 : DASH_DAMAGE;
+                        const result = target.takeDamage(dmg, this.facing, DASH_KNOCKBACK);
+                        this.hitApplied = true;
+                        if (result === 'hit' || result === 'killed') {
+                            this.fury = Math.min(FURY_MAX, this.fury + FURY_PER_HIT);
+                            triggerZoom(1.03, (this.x + target.x) / 2, (this.y + target.y) / 2 - 20, 0.3);
+                        }
+                    }
+                }
+                if (this.stateTime >= DASH_DURATION) {
+                    this.state = 'idle'; this.stateTime = 0; this.invincible = false;
+                }
+                break;
+            }
+            case 'air_attack': {
+                if (!this.hitApplied && this.stateTime >= 0.05 && this.stateTime <= 0.25) {
+                    if (target && aabbOverlap(this.attackHitbox, target.hitbox)) {
+                        const dmg = this.powerBoost > 0 ? AIR_ATTACK_DAMAGE * 2 : AIR_ATTACK_DAMAGE;
+                        const result = target.takeDamage(dmg, this.facing, AIR_ATTACK_KNOCKBACK);
+                        this.hitApplied = true;
+                        if (result === 'hit') target.vy = AIR_JUGGLE_VY;
+                        if (result === 'hit' || result === 'killed') {
+                            this.fury = Math.min(FURY_MAX, this.fury + FURY_PER_HIT);
+                            playSound('air_hit');
+                            triggerZoom(1.03, target.x, target.y - 20, 0.3);
+                        }
+                    }
+                }
+                if (this.grounded || this.stateTime > 0.5) {
+                    this.state = 'idle'; this.stateTime = 0;
+                }
+                break;
+            }
+            case 'fury_ultimate': {
+                if (this.stateTime > 1.5) {
+                    this.state = 'idle'; this.stateTime = 0;
+                    this.invincible = false; this.furySlashCount = 0;
+                }
+                break;
+            }
             case 'dead':
                 // Stay dead
                 break;
@@ -1170,7 +1555,8 @@ class Fighter {
     }
 
     startAttack() {
-        if (this.state === 'dead' || this.state === 'hurt' || this.state === 'dodge') return;
+        if (this.state === 'dead' || this.state === 'hurt' || this.state === 'dodge' ||
+            this.state === 'dash_attack' || this.state === 'air_attack' || this.state === 'fury_ultimate') return;
         if (this.state === 'attack1' || this.state === 'attack2' || this.state === 'attack3') {
             // Queue combo
             this.canCombo = true;
@@ -1230,6 +1616,47 @@ class Fighter {
         playSound('lightning');
     }
 
+    startDashAttack() {
+        if (this.state === 'dead' || this.state === 'hurt' || this.state === 'dodge' ||
+            this.state === 'dash_attack' || this.state === 'fury_ultimate') return;
+        if (this.stamina < DASH_COST || this.dashCooldown > 0) return;
+        this.stamina -= DASH_COST;
+        this.state = 'dash_attack';
+        this.stateTime = 0;
+        this.hitApplied = false;
+        this.dashCooldown = 0.5;
+        this.invincible = true;
+        playSound('dash_attack');
+        spawnSpeedLines(this.x, this.y - 25, -this.facing, 8);
+    }
+
+    startAirAttack() {
+        if (this.state === 'dead' || this.state === 'hurt' || this.state === 'air_attack' ||
+            this.state === 'fury_ultimate') return;
+        if (this.grounded) return;
+        this.state = 'air_attack';
+        this.stateTime = 0;
+        this.hitApplied = false;
+        this.vy = 200;
+        playSound('saber_swing');
+    }
+
+    activateFury() {
+        if (this.fury < FURY_MAX) return;
+        if (this.state === 'dead' || this.state === 'fury_ultimate') return;
+        this.fury = 0;
+        this.state = 'fury_ultimate';
+        this.stateTime = 0;
+        this.furySlashCount = 0;
+        this.invincible = true;
+        playSound('fury_activate');
+        triggerSlowMo(0.2, 1.5);
+        triggerZoom(1.15, this.x, this.y - 30, 1.5);
+        triggerFlash('#ff44ff', 0.6);
+        triggerShake(15, 0.3);
+        triggerChroma(1);
+    }
+
     draw(time) {
         if (this.isPlayer) {
             drawJedi(this.x, this.y, this.facing, this.state, this.stateTime, this.hp, this.maxHp);
@@ -1240,8 +1667,8 @@ class Fighter {
         // Lightning visual
         if (this.lightningActive && this.lightningTarget) {
             drawLightning(
-                this.x + this.facing * 20,
-                this.y - 30,
+                this.x + this.facing * 40,
+                this.y - 75,
                 this.lightningTarget.x,
                 this.lightningTarget.y,
                 time
@@ -1250,39 +1677,121 @@ class Fighter {
     }
 }
 
-function drawLightning(x1, y1, x2, y2, time) {
-    const segments = 8;
-    ctx.save();
-    ctx.strokeStyle = '#8888ff';
-    ctx.shadowColor = '#4444ff';
-    ctx.shadowBlur = 15;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
+function drawLightningBolt(x1, y1, x2, y2, width, jitter) {
+    const segments = 10;
+    const points = [{ x: x1, y: y1 }];
     for (let i = 1; i < segments; i++) {
         const t = i / segments;
-        const mx = x1 + (x2 - x1) * t;
-        const my = y1 + (y2 - y1) * t;
-        const offset = (Math.random() - 0.5) * 30;
-        ctx.lineTo(mx + offset, my + offset * 0.5);
+        points.push({
+            x: x1 + (x2 - x1) * t + (Math.random() - 0.5) * jitter,
+            y: y1 + (y2 - y1) * t + (Math.random() - 0.5) * jitter * 0.5,
+        });
     }
-    ctx.lineTo(x2, y2);
+    points.push({ x: x2, y: y2 });
+
+    // Outer glow
+    ctx.strokeStyle = '#6666ff';
+    ctx.lineWidth = width + 4;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+
+    // Main bolt
+    ctx.strokeStyle = '#aaaaff';
+    ctx.lineWidth = width + 1;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
     ctx.stroke();
 
     // Bright core
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = width;
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    for (let i = 1; i < segments; i++) {
-        const t = i / segments;
-        const mx = x1 + (x2 - x1) * t;
-        const my = y1 + (y2 - y1) * t;
-        const offset = (Math.random() - 0.5) * 15;
-        ctx.lineTo(mx + offset, my + offset * 0.5);
-    }
-    ctx.lineTo(x2, y2);
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
     ctx.stroke();
+
+    return points;
+}
+
+function drawLightning(x1, y1, x2, y2, time) {
+    ctx.save();
+    ctx.shadowColor = '#4444ff';
+    ctx.shadowBlur = 20;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Main bolt (thick, strong)
+    const mainPoints = drawLightningBolt(x1, y1, x2, y2, 2, 35);
+
+    // Secondary bolts (thinner, more erratic)
+    ctx.globalAlpha = 0.6;
+    drawLightningBolt(x1, y1, x2, y2, 1, 50);
+
+    // Branches from main bolt
+    ctx.globalAlpha = 0.4;
+    for (let b = 0; b < 3; b++) {
+        const branchIdx = 2 + Math.floor(Math.random() * 5);
+        if (branchIdx >= mainPoints.length) continue;
+        const bp = mainPoints[branchIdx];
+        const branchEnd = {
+            x: bp.x + (Math.random() - 0.5) * 60,
+            y: bp.y + (Math.random() - 0.3) * 40,
+        };
+        const bSegs = 4;
+        ctx.strokeStyle = '#8888ff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bp.x, bp.y);
+        for (let i = 1; i < bSegs; i++) {
+            const t = i / bSegs;
+            ctx.lineTo(
+                bp.x + (branchEnd.x - bp.x) * t + (Math.random() - 0.5) * 15,
+                bp.y + (branchEnd.y - bp.y) * t + (Math.random() - 0.5) * 10
+            );
+        }
+        ctx.lineTo(branchEnd.x, branchEnd.y);
+        ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Hand glow (origin)
+    const handGrad = ctx.createRadialGradient(x1, y1, 0, x1, y1, 25);
+    handGrad.addColorStop(0, 'rgba(150, 150, 255, 0.6)');
+    handGrad.addColorStop(0.5, 'rgba(100, 100, 255, 0.2)');
+    handGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = handGrad;
+    ctx.fillRect(x1 - 25, y1 - 25, 50, 50);
+
+    // Flickering hand sparks
+    for (let i = 0; i < 3; i++) {
+        const sx = x1 + (Math.random() - 0.5) * 14;
+        const sy = y1 + (Math.random() - 0.5) * 14;
+        ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = 0.5 + Math.random() * 0.5;
+        ctx.fillRect(sx, sy, 2, 2);
+    }
+
+    // Impact glow (target)
+    const impactGrad = ctx.createRadialGradient(x2, y2, 0, x2, y2, 35);
+    impactGrad.addColorStop(0, 'rgba(180, 150, 255, 0.5)');
+    impactGrad.addColorStop(0.4, 'rgba(100, 80, 255, 0.2)');
+    impactGrad.addColorStop(1, 'transparent');
+    ctx.globalAlpha = 0.7 + Math.sin(time * 30) * 0.3;
+    ctx.fillStyle = impactGrad;
+    ctx.fillRect(x2 - 35, y2 - 35, 70, 70);
+
+    // Impact sparks
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < 4; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 5 + Math.random() * 15;
+        ctx.fillStyle = i % 2 === 0 ? '#ffffff' : '#aaaaff';
+        ctx.fillRect(x2 + Math.cos(angle) * dist, y2 + Math.sin(angle) * dist, 2, 2);
+    }
+
     ctx.shadowBlur = 0;
     ctx.restore();
 }
@@ -1473,11 +1982,36 @@ function drawHUD(player, waveManager, score, bestScore, comboCount, comboTimer) 
     // Force bar
     drawBar(20, 58, 160, 12, player.force, player.maxForce, '#2244cc', '#001144', 'FRC');
 
-    // Force push cooldown
+    // Fury bar
+    drawBar(20, 74, 160, 12, player.fury, FURY_MAX, '#ff44ff', '#440044', 'FURY');
+    if (player.fury >= FURY_MAX) {
+        const fp = 0.5 + 0.5 * Math.sin(gameTime * 6);
+        ctx.globalAlpha = fp;
+        ctx.fillStyle = '#ff44ff';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText('SPC: FURY!', 190, 84);
+        ctx.globalAlpha = 1;
+    }
+
+    // Active effects & cooldowns
+    let effectY = 95;
     if (player.forcePushCooldown > 0) {
         ctx.fillStyle = '#ffffff';
-        ctx.font = '10px "Press Start 2P", monospace';
-        ctx.fillText(`PUSH: ${player.forcePushCooldown.toFixed(1)}s`, 20, 85);
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText(`PUSH: ${player.forcePushCooldown.toFixed(1)}s`, 20, effectY);
+        effectY += 14;
+    }
+    if (player.speedBoost > 0) {
+        ctx.fillStyle = '#ffff44';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText(`SPD x1.5 ${player.speedBoost.toFixed(1)}s`, 20, effectY);
+        effectY += 14;
+    }
+    if (player.powerBoost > 0) {
+        ctx.fillStyle = '#ff4444';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText(`PWR x2 ${player.powerBoost.toFixed(1)}s`, 20, effectY);
+        effectY += 14;
     }
 
     // Enemy HP bars (above heads)
@@ -1532,7 +2066,7 @@ function drawHUD(player, waveManager, score, bestScore, comboCount, comboTimer) 
     ctx.globalAlpha = 0.4;
     ctx.fillStyle = '#aaaacc';
     ctx.font = '8px "Press Start 2P", monospace';
-    ctx.fillText('←→ MOVE  ↑ JUMP  CTRL ATK  SHIFT BLOCK  ↓ DODGE  DEL PUSH  PGDN LIGHTNING', 20, GAME_H - 12);
+    ctx.fillText('←→ MOVE  ↑ JUMP  CTRL ATK  SHIFT BLOCK  ↓ DODGE  DEL PUSH  PGDN LTNG  ←← DASH  SPC FURY', 20, GAME_H - 12);
     ctx.globalAlpha = 1;
 }
 
@@ -1752,6 +2286,13 @@ function startGame() {
     score = 0;
     comboCount = 0;
     comboTimer = 0;
+    powerups.length = 0;
+    speedLines.length = 0;
+    timeScale = 1;
+    timeScaleDuration = 0;
+    cameraZoom = 1;
+    cameraZoomDuration = 0;
+    chromaIntensity = 0;
     startWave(1);
 }
 
@@ -1775,13 +2316,31 @@ function handlePlayerInput(dt) {
     if (!player || player.state === 'dead') return;
 
     const canMove = player.state === 'idle' || player.state === 'walk';
+    const moveSpeed = player.speedBoost > 0 ? PLAYER_SPEED * 1.5 : PLAYER_SPEED;
+
+    // Double-tap dash detection
+    doubleTapTimer -= dt;
+    if (wasJustPressed('ArrowRight')) {
+        if (lastTapDir === 1 && doubleTapTimer > 0 && canMove) {
+            player.facing = 1;
+            player.startDashAttack();
+            lastTapDir = 0; doubleTapTimer = 0;
+        } else { lastTapDir = 1; doubleTapTimer = DOUBLE_TAP_WINDOW; }
+    }
+    if (wasJustPressed('ArrowLeft')) {
+        if (lastTapDir === -1 && doubleTapTimer > 0 && canMove) {
+            player.facing = -1;
+            player.startDashAttack();
+            lastTapDir = 0; doubleTapTimer = 0;
+        } else { lastTapDir = -1; doubleTapTimer = DOUBLE_TAP_WINDOW; }
+    }
 
     if (canMove) {
         if (isPressed('ArrowLeft')) {
-            player.vx = -PLAYER_SPEED;
+            player.vx = -moveSpeed;
             player.state = 'walk';
         } else if (isPressed('ArrowRight')) {
-            player.vx = PLAYER_SPEED;
+            player.vx = moveSpeed;
             player.state = 'walk';
         } else if (player.state === 'walk') {
             player.state = 'idle';
@@ -1795,9 +2354,18 @@ function handlePlayerInput(dt) {
         player.grounded = false;
     }
 
-    // Attack — Right Ctrl or Numpad 0 (big easy-to-hit key)
+    // Attack — Air attack if airborne, else normal attack
     if (wasJustPressed('ControlRight') || wasJustPressed('Numpad0') || wasJustPressed('ControlLeft')) {
-        player.startAttack();
+        if (!player.grounded) {
+            player.startAirAttack();
+        } else {
+            player.startAttack();
+        }
+    }
+
+    // Fury Ultimate — Space
+    if (wasJustPressed('Space')) {
+        player.activateFury();
     }
 
     // Block — Right Shift (hold)
@@ -1829,8 +2397,10 @@ let lastTime = 0;
 function gameLoop(timestamp) {
     requestAnimationFrame(gameLoop);
 
-    const dt = Math.min(0.05, (timestamp - lastTime) / 1000);
+    rawDt = Math.min(0.05, (timestamp - lastTime) / 1000);
     lastTime = timestamp;
+    updateTimeScale(rawDt);
+    const dt = rawDt * timeScale;
     gameTime += dt;
 
     // Capture justPressed for this frame
@@ -1884,6 +2454,32 @@ function gameLoop(timestamp) {
             player.update(dt, closestEnemy);
             waveManager.update(dt, player);
 
+            // Fury ultimate multi-hit
+            if (player.state === 'fury_ultimate') {
+                const ft = player.stateTime;
+                const slashTimes = [0.3, 0.6, 0.9];
+                for (let i = 0; i < slashTimes.length; i++) {
+                    if (ft >= slashTimes[i] && player.furySlashCount <= i) {
+                        player.furySlashCount = i + 1;
+                        playSound('saber_swing');
+                        triggerShake(10, 0.15);
+                        spawnSpeedLines(player.x, player.y - 25, i % 2 === 0 ? player.facing : -player.facing, 12);
+                        triggerChroma(0.5);
+                        for (const enemy of waveManager.enemies) {
+                            if (enemy.state === 'dead') continue;
+                            if (Math.abs(enemy.x - player.x) < FURY_ULTIMATE_RANGE) {
+                                const dmg = player.powerBoost > 0 ? FURY_ULTIMATE_DAMAGE * 2 : FURY_ULTIMATE_DAMAGE;
+                                enemy.takeDamage(dmg, player.facing, 250);
+                                spawnParticles(enemy.x, enemy.y - 25, '#ff44ff', 15, 250, 0.5);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update power-ups
+            updatePowerups(dt, player);
+
             // Check kills for score/combo
             for (const enemy of waveManager.enemies) {
                 if (enemy.state === 'dead' && enemy.stateTime < dt * 2) {
@@ -1897,6 +2493,8 @@ function gameLoop(timestamp) {
                     comboTimer = 2;
                     lastKillTime = now;
                     score += 100 * waveManager.wave * comboCount;
+                    spawnPowerup(enemy.x);
+                    if (comboCount === 5) triggerSlowMo(0.5, 0.5);
                 }
             }
 
@@ -1914,13 +2512,17 @@ function gameLoop(timestamp) {
 
             // Wave cleared
             if (waveManager.waveCleared) {
+                triggerSlowMo(0.3, 1.0);
+                triggerZoom(1.05, player.x, player.y - 30, 1.0);
                 startWave(waveManager.wave + 1);
             }
 
             updateParticles(dt);
+            updateSpeedLines(dt);
             ageArcTrails(arcTrailsBlue, dt);
             ageArcTrails(arcTrailsRed, dt);
             updateSaberClashes(dt);
+            if (chromaIntensity > 0) { chromaIntensity -= rawDt * 4; if (chromaIntensity < 0) chromaIntensity = 0; }
             break;
 
         case GameState.PAUSED:
@@ -1950,6 +2552,14 @@ function draw(time) {
     ctx.imageSmoothingEnabled = false;
     ctx.save();
 
+    // Camera zoom
+    updateZoom(rawDt || 1/60);
+    if (cameraZoom !== 1) {
+        ctx.translate(cameraFocusX, cameraFocusY);
+        ctx.scale(cameraZoom, cameraZoom);
+        ctx.translate(-cameraFocusX, -cameraFocusY);
+    }
+
     // Screen shake
     updateShake(1 / 60);
 
@@ -1967,35 +2577,43 @@ function draw(time) {
 
         case GameState.PLAYING:
             drawBackground(time);
+            if (player) drawDynamicLighting(player, waveManager.enemies);
+            drawSpeedLines();
             drawArcTrail(arcTrailsBlue, '#88ccff', '#44aaff');
             drawArcTrail(arcTrailsRed, '#ff4444', '#ff0000');
             waveManager.draw(time);
             if (player) player.draw(time);
             drawParticles();
             drawSaberClashes();
+            drawPowerups();
             drawHUD(player, waveManager, score, bestScore, comboCount, comboTimer);
             break;
 
         case GameState.PAUSED:
             drawBackground(time);
+            if (player) drawDynamicLighting(player, waveManager.enemies);
+            drawSpeedLines();
             drawArcTrail(arcTrailsBlue, '#88ccff', '#44aaff');
             drawArcTrail(arcTrailsRed, '#ff4444', '#ff0000');
             waveManager.draw(time);
             if (player) player.draw(time);
             drawParticles();
             drawSaberClashes();
+            drawPowerups();
             drawHUD(player, waveManager, score, bestScore, comboCount, comboTimer);
             drawPauseScreen();
             break;
 
         case GameState.GAME_OVER:
             drawBackground(time);
+            if (player) drawDynamicLighting(player, waveManager.enemies);
             drawArcTrail(arcTrailsBlue, '#88ccff', '#44aaff');
             drawArcTrail(arcTrailsRed, '#ff4444', '#ff0000');
             waveManager.draw(time);
             if (player) player.draw(time);
             drawParticles();
             drawSaberClashes();
+            drawPowerups();
             drawGameOverScreen(time, score, bestScore, waveManager.wave);
             break;
     }
@@ -2009,6 +2627,18 @@ function draw(time) {
     }
 
     ctx.restore();
+
+    // Chromatic aberration (post-process, outside transform)
+    if (chromaIntensity > 0.01) {
+        const off = Math.ceil(chromaIntensity * 3);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.07 * chromaIntensity;
+        ctx.drawImage(canvas, -off, 0);
+        ctx.drawImage(canvas, off, 0);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.restore();
+    }
 }
 
 // --- START ---
